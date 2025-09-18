@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Guard — Link Risk Check</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="/static/style.css" rel="stylesheet" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>Guard</h1>
+    <p class="subtitle">Paste a link. Get a risk verdict and why—no accounts, no tracking.</p>
+
+    <form id="check-form">
+      <input id="url-input" type="text" placeholder="https://example.com/path?query=..." autocomplete="off" />
+      <button id="check-btn" type="submit">Check Link</button>
+    </form>
+
+    <div id="result" class="card hidden"></div>
+
+    <footer>
+      <small>⚠️ No tool is perfect. When in doubt, go directly to the official site/app.</small>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

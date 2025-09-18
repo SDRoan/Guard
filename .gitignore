@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv*/
+.env
+*.log
+
+# App artifacts
+models/*.joblib
+data/ioc_urls.txt
+data/*.csv
+
+# Editors / OS
+.vscode/
+.DS_Store
