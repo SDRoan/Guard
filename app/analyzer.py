@@ -1,6 +1,6 @@
 # app/analyzer.py
 from __future__ import annotations
-import re, pathlib, urllib.parse as _up, ipaddress
+import re, pathlib, urllib.parse as _up, ipaddress, random
 from typing import Dict, List, Tuple, Optional
 
 from joblib import load
@@ -144,16 +144,29 @@ def _is_public_web_url(u: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Parse error: {e}"
 
+
+# Use a realistic UA; some big sites block unknown agents (e.g., 999/403/429)
+_UA_POOL = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
+_ANTIBOT_STATUS = {403, 429, 999}
+
 def _fetch_page(u: str, max_bytes: int = 2_000_000, timeout_s: float = 8.0) -> tuple[str | None, str, str | None, Dict]:
     """
     Return (html_text, final_url, err, info_dict). Limits size/content-type; follows redirects.
-    info_dict includes status, content_type, bytes_fetched.
+    info_dict includes: status, content_type, bytes, blocked(bool)
     """
     headers = {
-        "User-Agent": "Guard/1.0 (+no-tracking; content-safety)",
+        "User-Agent": random.choice(_UA_POOL),
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://www.google.com/",
     }
-    info = {"status": None, "content_type": None, "bytes": None}
+    info = {"status": None, "content_type": None, "bytes": None, "blocked": False}
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout_s, headers=headers, http2=True) as client:
             r = client.get(u)
@@ -164,8 +177,14 @@ def _fetch_page(u: str, max_bytes: int = 2_000_000, timeout_s: float = 8.0) -> t
             if cl and cl.isdigit():
                 info["bytes"] = int(cl)
 
+            # Anti-bot detection
+            if r.status_code in _ANTIBOT_STATUS:
+                info["blocked"] = True
+                return None, final_url, f"Fetch blocked by site (HTTP {r.status_code})", info
+
             if r.status_code >= 400:
                 return None, final_url, f"HTTP {r.status_code}", info
+
             ctype = (info["content_type"] or "").lower()
             if not (ctype.startswith("text/html") or "xhtml" in ctype):
                 return None, final_url, f"Unsupported content-type: {ctype or 'unknown'}", info
@@ -179,10 +198,10 @@ def _fetch_page(u: str, max_bytes: int = 2_000_000, timeout_s: float = 8.0) -> t
                 html = body.decode("utf-8", errors="replace")
             return html, final_url, None, info
     except httpx.TransportError as e:
-        # Certificate/TLS/network issues show up here
         return None, u, f"Network/TLS error: {e}", info
     except Exception as e:
         return None, u, str(e), info
+
 
 def _get_meta(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
     """
@@ -214,6 +233,7 @@ def _get_meta(soup: BeautifulSoup) -> Dict[str, Optional[str]]:
 
     return {"title": title, "description": pick_desc(), "keywords": pick_keywords()}
 
+
 def _extract_readable_text(html: str, source_url: str | None = None) -> tuple[str, BeautifulSoup]:
     """
     Use trafilatura when possible; fallback to BeautifulSoup get_text.
@@ -235,6 +255,7 @@ def _extract_readable_text(html: str, source_url: str | None = None) -> tuple[st
     if len(text) > 30_000:
         text = text[:30_000] + " …"
     return text, soup
+
 
 def _summarize_text(text: str, max_sentences: int = 6, max_chars: int = 800) -> str:
     """Lightweight extractive summary (first few sentences)."""
@@ -293,6 +314,64 @@ def _classify_purpose(url: str, title: Optional[str], text: str, metas: Dict[str
 
     return "General web page"
 
+
+def _infer_about_from_url(url: str) -> str:
+    """
+    Fallback 'about' using only domain & path (works when fetch is blocked by anti-bot).
+    """
+    p = _up.urlsplit(url)
+    host = (p.hostname or "").lower()
+    path = (p.path or "").lower()
+
+    def has(seg: str) -> bool:
+        return seg in path
+
+    if host.endswith("linkedin.com"):
+        if has("/in/"):
+            return "LinkedIn profile"
+        if has("/company/"):
+            return "LinkedIn company page"
+        if has("/jobs/"):
+            return "LinkedIn job posting"
+        return "LinkedIn page"
+
+    if host in {"x.com", "twitter.com", "mobile.twitter.com"}:
+        if has("/status/"):
+            return "X (Twitter) post"
+        return "X (Twitter) profile/page"
+
+    if host.endswith("instagram.com"):
+        if has("/p/") or has("/reel/"):
+            return "Instagram post/reel"
+        return "Instagram profile/page"
+
+    if host.endswith("youtube.com") or host == "youtu.be":
+        if has("/watch") or host == "youtu.be":
+            return "YouTube video"
+        return "YouTube page"
+
+    if host.endswith("docs.google.com"):
+        if has("/forms/"):
+            return "Google Form"
+        if has("/document/"):
+            return "Google Doc"
+        if has("/spreadsheets/"):
+            return "Google Sheet"
+        if has("/presentation/"):
+            return "Google Slides"
+        return "Google Docs page"
+
+    if host.endswith("github.com"):
+        if len([seg for seg in path.split("/") if seg]) >= 2:
+            return "GitHub repository"
+        return "GitHub page"
+
+    if any(path.endswith(ext) for ext in (".pdf", ".docx", ".pptx")):
+        return "Document link"
+
+    return "Unknown page type"
+
+
 def _extract_contents(html: str) -> Dict:
     """
     Snapshot of 'what's inside right now':
@@ -348,6 +427,7 @@ def _extract_contents(html: str) -> Dict:
 
     out["images"] = len(soup.find_all("img"))
     return out
+
 
 def _compose_summary(about: str, metas: Dict[str, Optional[str]], text: str, inside: Dict, site_label: str) -> str:
     """
@@ -428,8 +508,22 @@ def analyze_url(url: str) -> Dict:
         content["http_status"] = info.get("status")
         content["content_type"] = info.get("content_type")
         content["bytes_fetched"] = info.get("bytes")
+
+        # Always provide at least an inferred "about"
+        inferred_about = _infer_about_from_url(final_url or url_norm)
+        content["about"] = inferred_about
+
         if err:
-            content["note"] = f"Fetch skipped: {err}"
+            # Anti-bot or other failure -> still give a helpful summary
+            if info.get("blocked"):
+                content["note"] = f"Fetch blocked by site (anti-bot)."
+            else:
+                content["note"] = f"Fetch skipped: {err}"
+            final_host = _up.urlsplit(final_url or url_norm).hostname or host
+            content["summary"] = (
+                f"This appears to be a {inferred_about.lower()} at {final_host}. "
+                f"The site did not allow automated fetching, so contents can’t be previewed here."
+            )
         elif html:
             txt, soup = _extract_readable_text(html, final_url)
             metas = _get_meta(soup)
@@ -437,7 +531,7 @@ def analyze_url(url: str) -> Dict:
             site_label = title or (host or final_url)
 
             inside = _extract_contents(html)
-            about = _classify_purpose(final_url, title, txt, metas, soup)
+            about = _classify_purpose(final_url, title, txt, metas, soup) or inferred_about
             summary = _compose_summary(about, metas, txt, inside, site_label)
 
             content["fetched"] = True
@@ -449,6 +543,8 @@ def analyze_url(url: str) -> Dict:
             content["note"] = "Empty response"
     else:
         content["note"] = f"Fetch blocked: {why_not}"
+        content["about"] = _infer_about_from_url(url_norm)
+        content["summary"] = f"This appears to be a {content['about'].lower()} at {host}."
 
     actions = ([
         "Do not enter any credentials.",
