@@ -12,6 +12,12 @@ import httpx
 from bs4 import BeautifulSoup
 import trafilatura
 
+# Optional (better domain labelling for redirect hops)
+try:
+    import tldextract  # noqa: F401
+except Exception:  # keep running if it's not installed
+    tldextract = None  # type: ignore
+
 # -------------------------------------------------------------------
 # Model location + in-process cache
 # -------------------------------------------------------------------
@@ -153,10 +159,30 @@ _UA_POOL = [
 ]
 _ANTIBOT_STATUS = {403, 429, 999}
 
+# --- Redirect-chain heuristics ---
+_SUS_TLDS = (".zip", ".mov", ".top", ".click", ".gq", ".tk", ".ml", ".cf", ".xyz")
+
+def _registered_domain(host: str) -> str:
+    if not host:
+        return ""
+    if tldextract:
+        ex = tldextract.extract(host)  # type: ignore[attr-defined]
+        return f"{ex.domain}.{ex.suffix}" if ex.suffix else host
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+def _host_is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except Exception:
+        return False
+
+
 def _fetch_page(u: str, max_bytes: int = 2_000_000, timeout_s: float = 8.0) -> tuple[str | None, str, str | None, Dict]:
     """
     Return (html_text, final_url, err, info_dict). Limits size/content-type; follows redirects.
-    info_dict includes: status, content_type, bytes, blocked(bool)
+    info_dict includes: status, content_type, bytes, blocked(bool), redirect_chain(list), redirect_score(int)
     """
     headers = {
         "User-Agent": random.choice(_UA_POOL),
@@ -166,11 +192,57 @@ def _fetch_page(u: str, max_bytes: int = 2_000_000, timeout_s: float = 8.0) -> t
         "Pragma": "no-cache",
         "Referer": "https://www.google.com/",
     }
-    info = {"status": None, "content_type": None, "bytes": None, "blocked": False}
+    info: Dict = {
+        "status": None,
+        "content_type": None,
+        "bytes": None,
+        "blocked": False,
+        "redirect_chain": [],
+        "redirect_score": 0,
+        "redirect_reasons": [],
+    }
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout_s, headers=headers, http2=True) as client:
             r = client.get(u)
             final_url = str(r.url)
+
+            # Build redirect chain (history + final response)
+            hops = list(r.history) + [r]
+            chain: List[Dict] = []
+            score = 0
+            for hop in hops:
+                url_s = str(hop.url)
+                p = _up.urlsplit(url_s)
+                host = (p.hostname or "").lower()
+                dom = _registered_domain(host)
+                ct = hop.headers.get("content-type", "")
+                flags: List[str] = []
+                if p.scheme != "https":
+                    flags.append("No HTTPS")
+                    score += 5
+                if _host_is_ip(host):
+                    flags.append("IP host")
+                    score += 10
+                if any(dom.endswith(t) for t in _SUS_TLDS):
+                    flags.append("Suspicious TLD")
+                    score += 10
+                chain.append({
+                    "url": url_s,
+                    "status": hop.status_code,
+                    "domain": dom or host,
+                    "https": (p.scheme == "https"),
+                    "content_type": (ct.split(";")[0].strip() if ct else ""),
+                    "flags": flags,
+                })
+
+            info["redirect_chain"] = chain
+            info["redirect_score"] = score
+            if score >= 20:
+                info["redirect_reasons"].append(
+                    "Redirect chain points to a risky destination (non-HTTPS / IP host / suspicious TLD)."
+                )
+
+            # Fill normal fetch info
             info["status"] = r.status_code
             info["content_type"] = r.headers.get("content-type", "")
             cl = r.headers.get("content-length")
@@ -500,14 +572,20 @@ def analyze_url(url: str) -> Dict:
         "summary": None,      # rich, human sentence(s)
         "inside": None,       # snapshot dict for UI
         "note": None,
+        "redirect_chain": [], # NEW: list of hops with flags
     }
     ok, why_not = _is_public_web_url(url_norm)
+    redirect_score = 0
+    redirect_reasons: List[str] = []
     if ok:
         html, final_url, err, info = _fetch_page(url_norm)
         content["final_url"] = final_url
         content["http_status"] = info.get("status")
         content["content_type"] = info.get("content_type")
         content["bytes_fetched"] = info.get("bytes")
+        content["redirect_chain"] = info.get("redirect_chain", [])
+        redirect_score = int(info.get("redirect_score", 0))
+        redirect_reasons = list(info.get("redirect_reasons", []) or [])
 
         # Always provide at least an inferred "about"
         inferred_about = _infer_about_from_url(final_url or url_norm)
@@ -546,6 +624,11 @@ def analyze_url(url: str) -> Dict:
         content["about"] = _infer_about_from_url(url_norm)
         content["summary"] = f"This appears to be a {content['about'].lower()} at {host}."
 
+    # Surface redirect chain reasons (if any)
+    if redirect_reasons:
+        reasons.extend(redirect_reasons)
+
+    # Final actions (same as before)
     actions = ([
         "Do not enter any credentials.",
         "If this claims to be your bank/service, open the official app or type the official domain.",
@@ -560,16 +643,19 @@ def analyze_url(url: str) -> Dict:
         "When in doubt, navigate to the official website directly."
     ])
 
+    # Combine ML risk with redirect heuristic (soft bump; max 0.25)
+    risk_score = min(1.0, round(p_mal + (redirect_score / 100.0), 4))
+
     return {
-        "label": label,
+        "label": label,  # label still reflects the ML model; UI shows reasons for redirects
         "confidence": confidence_for(label, p_mal),
-        "risk_score": round(p_mal, 2),  # 0..1 probability from the model
+        "risk_score": round(risk_score, 2),  # 0..1 combined
         "reasons": reasons[:5],
         "features": {
             "url": url_norm,
             "host": host,
             "tld": tld,
         },
-        "content": content,          # two-part (about + summary) lives here
+        "content": content,          # includes final_url + redirect_chain now
         "recommended_actions": actions,
     }

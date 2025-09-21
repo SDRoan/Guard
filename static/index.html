@@ -2,27 +2,82 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Guard — Link Risk Check</title>
+  <title>Guard — Link & QR Risk Check</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="/static/style.css" rel="stylesheet" />
+  <style>
+    .hidden { display:none !important; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .kv + .kv { margin-top:8px; }
+    .qr-wrap { margin-top:18px; }
+    video#qr-video { width:100%; max-height:240px; background:#111; border-radius:10px; }
+    canvas#qr-canvas { display:none; }
+    .hint { opacity:.75; font-size:.9em; }
+
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+    .loading { animation: pulse 1.5s ease-in-out infinite; }
+    * { transition: all .2s ease; }
+
+    @keyframes fadeInUp { from{opacity:0; transform:translateY(20px)} to{opacity:1; transform:none} }
+    @keyframes slideIn { from{opacity:0; transform:translateX(-20px)} to{opacity:1; transform:none} }
+    .card { animation: fadeInUp .6s ease-out; }
+    .qr-wrap { animation: slideIn .6s ease-out; }
+
+    button span { margin-right:.5rem; }
+
+    input:focus, button:focus { outline:2px solid var(--primary); outline-offset:2px; }
+
+    ::-webkit-scrollbar { width:8px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius:4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Guard</h1>
-    <p class="subtitle">Paste a link. Get a risk verdict and why—no accounts, no tracking.</p>
+    <header>
+      <div class="logo-container">
+        <svg class="logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+          <path d="M50 8 L85 28 L85 63 Q85 78 70 88 L50 98 L30 88 Q15 78 15 63 L15 28 Z"
+                fill="#6b7280" stroke="#4b5563" stroke-width="1"/>
+        </svg>
+        <h1>Guard</h1>
+      </div>
+      <p class="subtitle">Paste a link or scan a QR. I'll tell you what it really does—before you open anything.</p>
+    </header>
 
-    <form id="check-form">
-      <input id="url-input" type="text" placeholder="https://example.com/path?query=..." autocomplete="off" />
-      <button id="check-btn" type="submit">Check Link</button>
-    </form>
+    <main>
+      <!-- Link checker -->
+      <section>
+        <form id="check-form">
+          <input id="url-input" type="text" placeholder="https://example.com/path?query=..." autocomplete="off" inputmode="url" />
+          <button id="check-btn" type="submit"><span>🔍</span> Check Link</button>
+        </form>
+        <div id="result" class="card hidden" aria-live="polite"></div>
+      </section>
 
-    <div id="result" class="card hidden"></div>
+      <!-- QR scanner -->
+      <section class="qr-wrap">
+        <div class="kv">📱 QR Scanner</div>
+        <div class="row" style="margin:8px 0;">
+          <button id="qr-start" type="button"><span>📷</span> Start Camera</button>
+          <button id="qr-stop" type="button" class="warn"><span>⏹️</span> Stop Camera</button>
+          <span class="hint">Or upload a photo of a QR:</span>
+          <input id="qr-file" type="file" accept="image/*" />
+        </div>
+        <video id="qr-video" playsinline muted></video>
+        <canvas id="qr-canvas"></canvas>
+        <div id="qr-result" class="card hidden" aria-live="polite"></div>
+      </section>
 
+      
     <footer>
-      <small>⚠️ No tool is perfect. When in doubt, go directly to the official site/app.</small>
+      <small>⚠️ Don't trust—verify. When in doubt, go directly to the official app/site.</small>
     </footer>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <!-- bump query param to bust cache -->
+  <script src="/static/app.js?v=text2"></script>
 </body>
 </html>
