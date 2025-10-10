@@ -13,3 +13,9 @@ data/*.csv
 # Editors / OS
 .vscode/
 .DS_Store
+data/
+.env
+*.db
+*.sqlite
+__pycache__/
+*.pyc

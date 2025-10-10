@@ -24,13 +24,17 @@
     .qr-wrap { animation: slideIn .6s ease-out; }
 
     button span { margin-right:.5rem; }
-
     input:focus, button:focus { outline:2px solid var(--primary); outline-offset:2px; }
 
     ::-webkit-scrollbar { width:8px; }
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius:4px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+    /* Small helpers for the per-code panel */
+    .panel { max-width: 760px; margin: 24px auto; }
+    .badge { padding:.2rem .5rem; border:1px solid var(--border); border-radius:8px; font-size:.8rem; }
+    code.copy { user-select: all; }
   </style>
 </head>
 <body>
@@ -47,7 +51,7 @@
     </header>
 
     <main>
-      <!-- Link checker -->
+      <!-- Single Link checker -->
       <section>
         <form id="check-form">
           <input id="url-input" type="text" placeholder="https://example.com/path?query=..." autocomplete="off" inputmode="url" />
@@ -70,14 +74,30 @@
         <div id="qr-result" class="card hidden" aria-live="polite"></div>
       </section>
 
-      
+      <!-- Per-code Email Scan (privacy-safe) -->
+      <section class="panel card" id="scan-only">
+        <div class="kv">✉️ Email Scan (private)</div>
+        <p class="hint" style="margin:6px 0 12px;">
+          Generate a unique forwarding address. Forward your suspicious email there. This page will only show <em>your</em> scan.
+        </p>
+        <div class="row" style="margin-bottom:10px;">
+          <button id="gen-forward" class="btn"><span>🔑</span> Generate Forward Address</button>
+          <span class="hint">Tip: subject fallback also works — include <code>[GUARD:&lt;code&gt;]</code>.</span>
+        </div>
+        <p><strong>Forward to:</strong> <code id="forward-address" class="copy">—</code></p>
+        <p id="scan-status" aria-live="polite">Not started.</p>
+        <div id="scan-card"></div>
+      </section>
+
+      <!-- Removed public "Forwarded Email Inbox" to prevent leaking shared mailbox -->
+    </main>
+
     <footer>
       <small>⚠️ Don't trust—verify. When in doubt, go directly to the official app/site.</small>
     </footer>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-  <!-- bump query param to bust cache -->
-  <script src="/static/app.js?v=text2"></script>
+  <script src="/static/app.js?v=single-input"></script>
 </body>
 </html>
