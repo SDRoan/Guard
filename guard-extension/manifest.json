@@ -1,0 +1,26 @@
+{
+    "manifest_version": 3,
+    "name": "Guard — Analyze This Page",
+    "version": "0.1.0",
+    "description": "Sends the current page HTML to your Guard server to analyze (anti-bot safe).",
+    "permissions": ["activeTab", "scripting"],
+    "host_permissions": [
+      "<all_urls>",
+      "http://127.0.0.1:8000/*",
+      "http://localhost:8000/*"
+    ],
+    "action": {
+      "default_title": "Analyze with Guard"
+    },
+    "background": {
+      "service_worker": "background.js"
+    },
+    "content_scripts": [
+      {
+        "matches": ["<all_urls>"],
+        "js": ["content.js"],
+        "run_at": "document_idle"
+      }
+    ]
+  }
+  
