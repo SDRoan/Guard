@@ -35,7 +35,10 @@ function setLoading(el, isLoading, labelWhenLoading, labelWhenDone) {
   el.classList.toggle("loading", !!isLoading);
 }
 function badge(label) {
-  const cls = label === "High Risk" ? "bad" : label === "Suspicious" ? "warn" : "ok";
+  const cls =
+    label === "High Risk"   ? "bad"  :
+    label === "Suspicious"  ? "warn" :
+    label === "Likely Safe" ? "ok"   : "";
   return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
 }
 function escapeHtml(s) {
@@ -496,16 +499,28 @@ async function analyzeQrPayload(raw) {
     }
   }
 
-  // ---- Deep scan of links inside forwarded email ----
-  async function deepScanLinks(links, mount, statusEl) {
-    if (!links || !links.length) return;
-    const unique = Array.from(new Set(links.filter(u => /^https?:/i.test(u))));
-    const max = Math.min(unique.length, 8); // cap for speed; adjust as you like
-    statusEl.textContent = `Scanning ${max} link(s)…`;
-    mount.innerHTML = "";
+  // ---- Deep scan of links (tidy cards UI) ----
+  async function deepScanLinks(urls, resEl, stEl) {
+    if (!Array.isArray(urls) || !resEl) return;
+    const unique = Array.from(new Set(urls.filter(u => /^https?:/i.test(u))));
+    const MAX = Math.min(unique.length, 8);
+    stEl.textContent = MAX ? `Analyzing ${MAX} link(s)…` : "No links to analyze.";
+    resEl.innerHTML = "";
 
-    for (let i = 0; i < max; i++) {
-      const u = unique[i];
+    for (const u of unique.slice(0, MAX)) {
+      // skeleton card
+      const card = document.createElement("div");
+      card.className = "link-card";
+      card.innerHTML = `
+        <div class="row" style="justify-content:space-between;align-items:flex-start;">
+          <div class="url">${escapeHtml(u)}</div>
+          <span class="badge">Checking…</span>
+        </div>
+        <div class="kv">Fetching…</div>
+        <div class="summary"></div>
+      `;
+      resEl.appendChild(card);
+
       try {
         const res = await fetch("/analyze", {
           method: "POST",
@@ -515,32 +530,27 @@ async function analyzeQrPayload(raw) {
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || res.statusText);
 
-        const lbl   = data.label || "Unknown";
-        const score = fmtScore(data.risk_score);
+        const lbl   = data.label || "Needs Review";
         const c     = data.content || {};
         const final = c.final_url || u;
-        const about = c.about || c.title || "";
-        const summary = c.summary || "";
+        const about = c.about || c.title || "General web page";
+        const summary = c.summary || "No preview available.";
 
-        mount.innerHTML += `
-          <div class="card" style="margin-top:8px;">
-            <div class="row" style="justify-content:space-between;">
-              <div style="max-width:72%;">
-                <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                  <a href="${escapeHtml(final)}" target="_blank" rel="noopener">${escapeHtml(final)}</a>
-                </div>
-                ${about ? `<div class="hint" style="margin-top:2px;">${escapeHtml(about)}</div>` : ""}
-              </div>
-              <div>${badge(lbl)} <span class="hint" style="margin-left:6px">${escapeHtml(score)}/100</span></div>
-            </div>
-            ${summary ? `<div class="kv" style="margin-top:6px;"><b>Summary:</b> ${escapeHtml(summary)}</div>` : ""}
-          </div>
-        `;
-      } catch (e) {
-        mount.innerHTML += `<div class="kv warn">Failed to scan ${escapeHtml(u)}: ${escapeHtml(e.message || e)}</div>`;
+        const b = card.querySelector(".badge");
+        b.className = `badge ${lbl === "High Risk" ? "bad" : lbl === "Likely Safe" ? "ok" : "warn"}`;
+        b.textContent = lbl;
+
+        card.querySelector(".url").innerHTML = `<a href="${escapeHtml(final)}" target="_blank" rel="noopener">${escapeHtml(final)}</a>`;
+        card.querySelector(".kv").textContent = about;
+        card.querySelector(".summary").textContent = summary;
+      } catch {
+        const b = card.querySelector(".badge");
+        b.className = "badge warn";
+        b.textContent = "Error";
+        card.querySelector(".summary").textContent = "Failed to analyze this link.";
       }
     }
-    statusEl.textContent = "Done.";
+    if (MAX) stEl.textContent = "Done.";
   }
 
   function renderScanCard(payload) {
@@ -549,30 +559,59 @@ async function analyzeQrPayload(raw) {
     const why   = Array.isArray(payload?.scored?.reasons) ? payload.scored.reasons : [];
     const links = Array.isArray(payload?.scored?.links) ? payload.scored.links : [];
 
+    // PDFs: may exist at top-level (payload.pdfs) or nested (payload.scored.pdfs)
+    const pdfs  = Array.isArray(payload?.pdfs)
+      ? payload.pdfs
+      : (Array.isArray(payload?.scored?.pdfs) ? payload.scored.pdfs : []);
+
     const safeLinks = links.filter(u => /^https?:/i.test(u));
+
+    // PDFs block
+    const pdfsHtml = pdfs.length ? `
+      <div class="kv" style="margin-top:.5rem;"><strong>PDFs</strong> (${pdfs.length})</div>
+      <div>
+        ${pdfs.map(p => `
+          <div class="card nested" style="padding:12px; margin-top:8px;">
+            <div class="row" style="justify-content:space-between;">
+              <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                ${escapeHtml(p.name || "attachment.pdf")}
+              </div>
+              ${typeof p.pages === "number" ? `<span class="hint">${p.pages} page${p.pages===1?"":"s"}</span>` : ""}
+            </div>
+            ${p.snippet ? `<div class="hint" style="margin-top:6px">${escapeHtml(p.snippet)}</div>` : ""}
+          </div>
+        `).join("")}
+      </div>
+    ` : "";
+
+    // Scrollable link list with “Analyze links”
+    const listHtml = safeLinks.length ? `
+      <div class="scan-links" style="margin-top:.5rem;">
+        <div class="row" style="margin:.25rem 0 .5rem">
+          <div class="kv"><strong>Links</strong> (${safeLinks.length})</div>
+          <button id="scan-links" class="btn"><span>🧪</span> Analyze links</button>
+        </div>
+        <ul class="link-list">
+          ${safeLinks.map(u => `
+            <li class="link-item">
+              <a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a>
+            </li>`).join("")}
+        </ul>
+        <div id="link-scan-results" class="link-results"></div>
+        <div id="scan-links-status" class="status"></div>
+      </div>
+    ` : `<p class="status">No links found.</p>`;
 
     cardEl.innerHTML = `
       <div class="card">
         <div class="row" style="justify-content:space-between; align-items:flex-start;">
           <h4 style="margin:0">${escapeHtml(payload.subject || "Scanned email")}</h4>
-          <span class="badge">${escapeHtml(lvl)}${score !== "" ? ` (${escapeHtml(String(score))})` : ""}</span>
+          ${badge(lvl)} ${score !== "" ? `<span class="hint" style="margin-left:6px">${escapeHtml(String(score))}</span>` : ""}
         </div>
         <p style="margin:.5rem 0 0;"><strong>From:</strong> ${escapeHtml(payload.from || "")}</p>
         ${why.length ? `<ul style="margin:.5rem 0 0;">${why.map(r => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : "<p style='margin:.5rem 0 0;'>No suspicious signals found.</p>"}
-
-        ${
-          safeLinks.length
-            ? `
-          <div class="kv" style="margin-top:.5rem;"><strong>Links:</strong>
-            <ul>${safeLinks.map(u => `<li><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></li>`).join("")}</ul>
-            <div class="row" style="margin-top:8px;">
-              <button id="scan-links" class="btn"><span>🧪</span>Analyze links</button>
-              <span id="scan-links-status" class="hint"></span>
-            </div>
-            <div id="link-scan-results" class="kv"></div>
-          </div>`
-            : ""
-        }
+        ${pdfsHtml}
+        ${listHtml}
       </div>
     `;
 

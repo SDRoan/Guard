@@ -32,11 +32,14 @@ Optional env:
   GUARD_IMAP_BATCH         -> max messages per folder per poll (default 50)
   GUARD_IMAP_INCLUDE_SPAM  -> "1" (default) to also scan Spam; "0" to skip
   GUARD_SCAN_TTL_HOURS     -> hours to keep per-code files (default 24)
+  GUARD_MAX_PDF_BYTES      -> max PDF size to parse (default 15000000 bytes)
+  GUARD_PDF_MAX_PAGES      -> pages to read from each PDF (default 3)
 """
 
 import os
 import re
 import ssl
+import io
 import json
 import time
 import imaplib
@@ -49,6 +52,9 @@ import email
 from email import policy
 from email.header import decode_header, make_header
 
+# --- PDF parsing ---
+from pypdf import PdfReader
+
 # ---------------- Paths & config ----------------
 DATA_DIR = pathlib.Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,11 +66,15 @@ SCAN_DIR.mkdir(parents=True, exist_ok=True)
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
 
-POLL_SECONDS  = int(os.environ.get("GUARD_IMAP_POLL", "15"))
-BATCH_LIMIT   = int(os.environ.get("GUARD_IMAP_BATCH", "50"))  # max msgs per cycle per folder
+POLL_SECONDS   = int(os.environ.get("GUARD_IMAP_POLL", "15"))
+BATCH_LIMIT    = int(os.environ.get("GUARD_IMAP_BATCH", "50"))  # max msgs per cycle per folder
 MAX_HTML_BYTES = 200_000
-INCLUDE_SPAM  = os.environ.get("GUARD_IMAP_INCLUDE_SPAM", "1") != "0"
+INCLUDE_SPAM   = os.environ.get("GUARD_IMAP_INCLUDE_SPAM", "1") != "0"
 SCAN_TTL_HOURS = int(os.environ.get("GUARD_SCAN_TTL_HOURS", "24"))
+
+# PDF limits
+MAX_PDF_BYTES  = int(os.environ.get("GUARD_MAX_PDF_BYTES", str(15_000_000)))  # 15 MB
+PDF_MAX_PAGES  = int(os.environ.get("GUARD_PDF_MAX_PAGES", "3"))
 
 # ---------------- Env helpers ----------------
 def env(name: str) -> str:
@@ -157,6 +167,91 @@ def score_message(api_base: str, payload: Dict) -> Dict:
         r = client.post(url, json=payload)
         r.raise_for_status()
         return r.json()
+
+# -------- PDF extraction helpers --------
+def _summarize(text: str, max_sentences: int = 4, max_chars: int = 600) -> str:
+    if not text:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    out = " ".join(parts[:max_sentences]).strip()
+    return (out[:max_chars].rstrip() + " …") if len(out) > max_chars else out
+
+def extract_pdf_attachments(msg: email.message.Message,
+                            max_pages: int = PDF_MAX_PAGES,
+                            max_chars: int = 2000) -> List[Dict]:
+    """
+    Walk the email and extract a light-weight preview of PDF attachments.
+    Returns a list of dicts: [{filename, type, pages, chars, preview, summary, note?}]
+    """
+    pdfs: List[Dict] = []
+    for part in msg.walk():
+        cdisp = (part.get_content_disposition() or "").lower()
+        ctype = (part.get_content_type() or "").lower()
+        fname = _decode_header(part.get_filename() or "") or "attachment.pdf"
+
+        is_pdf = ("pdf" in ctype) or fname.lower().endswith(".pdf")
+        if not is_pdf:
+            continue
+
+        # Some clients mark PDFs as inline; we still treat them as attachments for preview
+        try:
+            data = part.get_payload(decode=True) or b""
+        except Exception:
+            data = b""
+
+        if not data:
+            pdfs.append({
+                "filename": fname,
+                "type": "application/pdf",
+                "pages": 0,
+                "chars": 0,
+                "preview": "",
+                "summary": "",
+                "note": "No data in part",
+            })
+            continue
+
+        if len(data) > MAX_PDF_BYTES:
+            pdfs.append({
+                "filename": fname,
+                "type": "application/pdf",
+                "pages": 0,
+                "chars": len(data),
+                "preview": "",
+                "summary": "",
+                "note": f"Skipped (>{MAX_PDF_BYTES} bytes)",
+            })
+            continue
+
+        pages = 0
+        preview = ""
+        chars = 0
+        note = None
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            pages = len(reader.pages)
+            chunks = []
+            for pg in reader.pages[:max_pages]:
+                t = (pg.extract_text() or "").strip()
+                if t:
+                    chunks.append(t)
+            joined = "\n\n".join(chunks)
+            preview = joined[:max_chars].strip()
+            chars = len(joined)
+        except Exception as e:
+            note = f"Could not extract text: {type(e).__name__}"
+
+        pdfs.append({
+            "filename": fname,
+            "type": "application/pdf",
+            "pages": pages,
+            "chars": chars,
+            "preview": preview,
+            "summary": _summarize(preview),
+            **({"note": note} if note else {}),
+        })
+
+    return pdfs
 
 # ---------------- IMAP helpers ----------------
 def fetch_uids_newer_than(imap: imaplib.IMAP4_SSL, last_uid: int) -> List[int]:
@@ -334,6 +429,14 @@ def run_loop():
                                 print(f"[{box}] [UID {uid}] scoring failed: {e}")
                                 continue
 
+                            # ---- NEW: extract PDF previews/summaries ----
+                            pdfs = []
+                            try:
+                                pdfs = extract_pdf_attachments(msg)
+                            except Exception as e:
+                                # Non-fatal: log and keep going
+                                print(f"[{box}] [UID {uid}] PDF extract failed: {e}")
+
                             doc = {
                                 "code": code,
                                 "uid": uid,
@@ -341,6 +444,8 @@ def run_loop():
                                 "date": msg.get("Date") or "",
                                 "from": scored.get("from") or from_addr,
                                 "subject": scored.get("subject") or subject,
+                                "attachment_names": atts or [],
+                                "attachments": {"pdf": pdfs} if pdfs else {},
                                 "scored": {
                                     "risk": scored.get("risk", "Unknown"),
                                     "score": scored.get("score"),
@@ -351,7 +456,11 @@ def run_loop():
                             }
 
                             (SCAN_DIR / f"{code}.json").write_text(json.dumps(doc, indent=2))
-                            print(f"[{box}] [UID {uid}] -> code={code}  {doc['scored']['risk']} ({doc['scored']['score']}) — {doc['subject']}")
+                            print(
+                                f"[{box}] [UID {uid}] -> code={code}  "
+                                f"{doc['scored']['risk']} ({doc['scored']['score']}) — {doc['subject']} "
+                                f"{'(PDFs:'+str(len(pdfs))+')' if pdfs else ''}"
+                            )
 
                         except Exception as inner_e:
                             print(f"[{box}] [UID {uid}] error: {inner_e}")

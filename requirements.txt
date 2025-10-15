@@ -16,3 +16,4 @@ joblib==1.3.2
 pypdf
 tldextract
 tldextract
+pypdf
